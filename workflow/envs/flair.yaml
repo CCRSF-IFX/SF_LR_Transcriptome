@@ -1,0 +1,11 @@
+name: flair
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - flair=1.5
+  - pip
+  - cython
+  - pip:
+    - kerneltree

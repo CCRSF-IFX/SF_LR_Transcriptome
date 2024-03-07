@@ -1,0 +1,7 @@
+name: nanocount
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - nanocount

@@ -1,18 +1,157 @@
-# The main entry point of your workflow.
-# After configuring, running snakemake -n in a clone of this repository should successfully execute a dry-run of the workflow.
+from snakemake.utils import validate
+import pandas as pd
 
+configfile: "config.yaml"
 
-report: "report/workflow.rst"
+def load_samples(samplesheet):
+    samples = {}
+    with open(samplesheet, 'r') as f:
+        for line in f:
+            sample, path, genome = line.strip().split(',')
+            samples[sample] = {'path': path, 'genome': genome}
+    return samples
 
-# Allow users to fix the underlying OS via singularity.
-singularity: "docker://continuumio/miniconda3"
+SAMPLES = load_samples(config["sample_sheet"])
 
+def get_fastq_path(wildcards):
+    return SAMPLES[wildcards.sample]['path']
+
+def get_genome_path(wildcards):
+    genome_id = SAMPLES[wildcards.sample]['genome']
+    return config['genomes'][genome_id]['ref']
 
 rule all:
+    input: expand("Sample_{sample}/{sample}.sqanti_classification.filtered_lite_sqanti_report.pdf", sample=SAMPLES), expand("Sample_{sample}/{sample}.longgf.out", sample=SAMPLES), expand("Sample_{sample}/{sample}.nanocount.from.sqanti.filter.tsv", sample=SAMPLES)
+
+rule align:
+    input: get_fastq_path
+    output: bed = "Sample_{sample}/{sample}.bed", bam = "Sample_{sample}/{sample}.bam"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    conda: "env/flair.yaml"
+    log: "Sample_{sample}/{sample}_mapping.log"
+    params: prefix = "Sample_{sample}/{sample}", reference=get_genome_path
+    shell: "flair.py align -t 36 -o {params.prefix} -r {input} -g {params.reference} 2>{log}"
+
+def get_gtf_path(wildcards):
+    genome_id = SAMPLES[wildcards.sample]['genome']
+    return config['genomes'][genome_id]['gtf']
+
+rule sortn:
+    input: "Sample_{sample}/{sample}.bam"
+    output: temp("Sample_{sample}/{sample}.bn_sorted.bam")
+    resources: mem_mb=128000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_sortn.log"
+    conda: "env/samtools.yaml"
+    shell:
+        "samtools sort -j {threads} -n -o {output} {input} 2> {log}"
+
+rule longgf:
+    input: "Sample_{sample}/{sample}.bn_sorted.bam"
+    output: "Sample_{sample}/{sample}.longgf.out"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_longgf.log"
+    params:
+        gtf=get_gtf_path
+    conda: "env/longgf.yaml"
+    shell:
+        "LongGF {input} {params.gtf} 100 50 200 > {output} 2> {log}"
+
+rule correct:
+    input: "Sample_{sample}/{sample}.bed"
+    output: "Sample_{sample}/{sample}_all_corrected.bed"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_correct.log"
+    params:
+        ref=get_genome_path,
+        gtf=get_gtf_path,
+        out=lambda wildcards: f"Sample_{wildcards.sample}/{wildcards.sample}"
+    conda: "env/flair.yaml"
+    shell:
+        "flair.py correct -o {params.out} -t {threads} -g {params.ref} -f {params.gtf} -q {input} 2> {log}"
+
+rule collapse:
     input:
-        # The first rule should define the default target files
-        # Subsequent target rules can be specified below. They should start with all_*.
+        file1="Sample_{sample}/{sample}_all_corrected.bed",
+        file2=get_fastq_path
+    output: "Sample_{sample}/{sample}.isoforms.fa"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_collapse.log"
+    params:
+        gtf=get_gtf_path,
+        ref=get_genome_path,
+        out=lambda wildcards: f"Sample_{wildcards.sample}/{wildcards.sample}"
+    conda: "env/flair.yaml"
+    shell:
+        "flair.py collapse -f {params.gtf} -g {params.ref} -r {input.file2} -q {input.file1} -o {params.out} -t {threads} --stringent --check_splice --generate_map --annotation_reliant generate 2> {log}"
 
+def get_cagepeak_path(wildcards):
+    genome_id = SAMPLES[wildcards.sample]['genome']
+    return config['genomes'][genome_id]['cagepeak']
+    
+def get_polya_path(wildcards):
+    genome_id = SAMPLES[wildcards.sample]['genome']
+    return config['genomes'][genome_id]['polya']    
 
-include: "rules/common.smk"
-include: "rules/other.smk"
+rule sqanti:
+    input: "Sample_{sample}/{sample}.isoforms.fa"
+    output:
+        pdf="Sample_{sample}/{sample}.sqanti_sqanti_report.pdf",
+        txt="Sample_{sample}/{sample}.sqanti_classification.txt",
+        fasta="Sample_{sample}/{sample}.sqanti_corrected.fasta",
+        gtf="Sample_{sample}/{sample}.sqanti_corrected.gtf"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_sqanti.log"
+    params:
+        out=lambda wildcards: f"Sample_{wildcards.sample}/{wildcards.sample}.sqanti",
+        gtf=get_gtf_path,
+        ref=get_genome_path,
+        cagepeak=get_cagepeak_path,
+        polya=get_polya_path
+    conda: "env/sqanti.yaml"
+    shell:
+        "sqanti_qc.py {input} {params.gtf} {params.ref} --aligner_choice=minimap2 -t {threads} -o {params.out} --cage_peak {params.cagepeak} --polyA_motif_list {params.polya} --isoAnnotLite --force_id_ignore 2> {log}"
+
+rule sqanti_filter:
+    input:
+        classification="Sample_{sample}/{sample}.sqanti_classification.txt",
+        fa="Sample_{sample}/{sample}.sqanti_corrected.fasta",
+        sgtf="Sample_{sample}/{sample}.sqanti_corrected.gtf"
+    output:
+        pdf="Sample_{sample}/{sample}.sqanti_classification.filtered_lite_sqanti_report.pdf",
+        fasta="Sample_{sample}/{sample}.sqanti_classification.filtered_lite.fasta"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_sqanti_filter.log"
+    params:
+        out=lambda wildcards: f"Sample_{wildcards.sample}/{wildcards.sample}.sqanti_classification"
+    conda: "env/sqanti.yaml"
+    shell:
+        "sqanti_filter.py {input.classification} {input.fa} {input.sgtf} -o {params.out} --skipGTF 2> {log}"
+
+rule ncmap:
+    input: "Sample_{sample}/{sample}.sqanti_classification.filtered_lite.fasta"
+    output: "Sample_{sample}/{sample}.aligned.to.sqanti.filter.bam"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 16
+    log: "Sample_{sample}/{sample}_ncmap.log"
+    params:
+      ref=get_genome_path
+    conda: "env/minimap2.yaml"
+    shell:
+        "minimap2 -t {threads} -ax map-ont -p 0 -N10 {params.ref} {input} | samtools view -bh > {output} 2> {log}"
+
+rule nanocount:
+    input: "Sample_{sample}/{sample}.aligned.to.sqanti.filter.bam"
+    output: "Sample_{sample}/{sample}.nanocount.from.sqanti.filter.tsv"
+    resources: mem_mb=400000, time="96:00:00", partition="norm"
+    threads: 36
+    log: "Sample_{sample}/{sample}_nanocount.log"
+    #conda: "env/nanocount.yaml"
+    shell:
+        "/mnt/ccrsf-ifx/Software/tools/Anaconda/3.6/install/bin/NanoCount -i {input} -o {output} 2> {log}"

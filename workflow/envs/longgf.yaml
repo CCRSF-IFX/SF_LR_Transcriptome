@@ -1,0 +1,7 @@
+name: longgf
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - longgf=0.1.2
