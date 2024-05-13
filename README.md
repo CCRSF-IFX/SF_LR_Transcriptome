@@ -102,3 +102,5 @@ In case you have also changed or added steps, please consider contributing them 
 
 Test cases are in the subfolder `.test`. They are automatically executed via continuous integration with [Github Actions](https://github.com/features/actions).
 
+## Contact
+CCRSF_IFX@nih.gov
